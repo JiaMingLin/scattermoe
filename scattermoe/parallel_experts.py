@@ -3,20 +3,24 @@ import torch.nn as nn
 from . import kernels
 from typing import Optional
 
-@torch.library.custom_op("scattermoe::bincount", mutates_args={})
-def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
-        return x.bincount(minlength=minlength)
+# TEMPORARY: Commented out for debugging - check if torch.compile causes sync issues
+# @torch.library.custom_op("scattermoe::bincount", mutates_args={})
+# def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
+#         return x.bincount(minlength=minlength)
+#
+# @compileable_bincount.register_fake
+# def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
+#     return torch.empty(minlength, dtype=torch.long, device=x.device)
 
-@compileable_bincount.register_fake
-def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
-    return torch.empty(minlength, dtype=torch.long, device=x.device)
-
-@torch.compile
+# TEMPORARY: Commented out @torch.compile for debugging - check if compile causes graph breaks/sync
+# @torch.compile
 def flatten_sort_count(expert_idxs: torch.Tensor, num_experts: int):
     with torch.no_grad():
         flattened_expert_idxs = expert_idxs.flatten()
         sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
-        expert_counts = compileable_bincount(flattened_expert_idxs, minlength=num_experts)
+        # TEMPORARY: Use torch.bincount directly instead of compileable_bincount
+        expert_counts = flattened_expert_idxs.bincount(minlength=num_experts)
+        # expert_counts = compileable_bincount(flattened_expert_idxs, minlength=num_experts)
         expert_offsets = expert_counts.cumsum(-1)
         return sorted_expert_idxs, sorted_scattered_idxs, expert_offsets
 
@@ -33,32 +37,43 @@ class ParallelLinear(torch.autograd.Function):
         gates: Optional[torch.Tensor]=None,
         grouped_in: bool =False, grouped_out: bool=False,
     ):
-        with torch.device(x.device):
-            output = kernels.ops.scatter2scatter(
-                X=x, W=expert_weights,
-                b=expert_biases, k=k,
-                sorted_expert_idxs=sorted_expert_idxs,
-                sorted_scattered_idxs=sorted_scattered_idxs,
-                x_grouped=grouped_in, y_grouped=grouped_out
-            )
-            if gates is not None:
+        # Kernel label with parameters for clarity
+        kernel_name = f"s2s_fused_linear[k={k},x_grouped={grouped_in},y_grouped={grouped_out}]"
+        torch.cuda.nvtx.range_push(kernel_name)
+        try:
+            with torch.device(x.device):
+                output = kernels.ops.scatter2scatter(
+                    X=x, W=expert_weights,
+                    b=expert_biases, k=k,
+                    sorted_expert_idxs=sorted_expert_idxs,
+                    sorted_scattered_idxs=sorted_scattered_idxs,
+                    x_grouped=grouped_in, y_grouped=grouped_out
+                )
+        finally:
+            torch.cuda.nvtx.range_pop()  # s2s_fused_linear
+            
+        if gates is not None:
+            torch.cuda.nvtx.range_push("gate_weighted_sum")
+            try:
                 output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
                 output = (gates.unsqueeze(1) @ output_expanded).squeeze(1)
-            else:
-                output_expanded = None
+            finally:
+                torch.cuda.nvtx.range_pop()  # gate_weighted_sum
+        else:
+            output_expanded = None
 
-            ctx.save_for_backward(
-                x, expert_weights,
-                expert_biases,
-                sorted_expert_idxs,
-                sorted_scattered_idxs,
-                expert_offsets,
-                gates,
-                output_expanded
-            )
-            ctx.grouped_in = grouped_in
-            ctx.grouped_out = grouped_out
-            ctx.k = k
+        ctx.save_for_backward(
+            x, expert_weights,
+            expert_biases,
+            sorted_expert_idxs,
+            sorted_scattered_idxs,
+            expert_offsets,
+            gates,
+            output_expanded
+        )
+        ctx.grouped_in = grouped_in
+        ctx.grouped_out = grouped_out
+        ctx.k = k
         return output
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):

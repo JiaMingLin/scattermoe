@@ -1,0 +1,41 @@
+{
+  "distribution": "zipf",
+  "num_tokens": 4096,
+  "num_experts": 66,
+  "top_k": 8,
+  "block_m": 128,
+  "summary": {
+    "span": {
+      "p50": 1.0,
+      "p95": 2.25,
+      "p99": 5.0,
+      "max": 5.0,
+      "min": 1.0
+    },
+    "unique": {
+      "p50": 1.0,
+      "p95": 2.25,
+      "p99": 5.0,
+      "max": 5.0,
+      "min": 1.0
+    },
+    "transitions": {
+      "p50": 0.0,
+      "p95": 1.25,
+      "p99": 4.0,
+      "max": 4.0,
+      "min": 0.0
+    },
+    "major_ratio": {
+      "p50": 1.0,
+      "p95": 1.0,
+      "p99": 1.0,
+      "max": 1.0,
+      "min": 0.28125
+    },
+    "frac_mixed": 0.16015625,
+    "frac_heavy": 0.02734375,
+    "num_blocks": 256,
+    "num_valid_blocks": 256
+  }
+}
